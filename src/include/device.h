@@ -11,6 +11,7 @@
 #include "nccl.h"
 #include "nccl_device/core.h"
 #include "nccl_tuner.h"
+#include "plugin/nccl_profiler.h"
 #include "bitops.h"
 #include <algorithm>
 #include <stdint.h>
@@ -312,7 +313,7 @@ struct alignas(16) ncclDevWorkColl {
     } collnet;
   };
   uint64_t redOpArg;
-  uint8_t pad2[8];   // pad struct to multiple of 16
+  void* profilerEventHandle;
 };
 
 struct alignas(16) ncclDevWorkBcast {
@@ -457,6 +458,8 @@ struct ncclKernelComm {
   // Profiler counters
   struct ncclDevProfiler* workStarted /*[MAXCHANNELS]*/;
   struct ncclDevProfiler* workCompleted /*[MAXCHANNELS]*/;
+
+  struct ncclDeviceFifo* deviceFifo;
 };
 
 struct alignas(16) ncclKernelCommAndChannels {

@@ -123,6 +123,8 @@ static ncclResult_t ncclProfiler_init(void** ctx, uint64_t commId, int* eActivat
   ncclProfiler.recordEventState = ncclProfiler_recordEventState;
   ncclProfiler.stopEvent = ncclProfiler_v4->stopEvent;
   ncclProfiler.finalize = ncclProfiler_v4->finalize;
+  ncclProfiler.createDeviceFifo = nullptr;
+  ncclProfiler.destroyDeviceFifo = nullptr;
   return ncclSuccess;
 }
 

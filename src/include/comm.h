@@ -758,6 +758,9 @@ struct ncclComm {
   void* profilerContext;
   uint64_t seqNumber[NCCL_NUM_FUNCTIONS];
   struct ncclProfilerProxy profiler;
+  int nDevicefifo;
+  struct ncclDeviceFifo deviceFifo[MAXCHANNELS];
+  void* deviceFifoHandle[MAXCHANNELS];
 
   // RMA state
   struct ncclRmaState rmaState;

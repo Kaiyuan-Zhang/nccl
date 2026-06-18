@@ -6,7 +6,25 @@
  *************************************************************************/
 
 #include "network/unpack/unpack.h"
-#include <cassert>
+#include "telemetry/fifo_ref.h"
+#include "telemetry/trace_event.h"
+#ifndef NCCL_NVLS_TELEMETRY
+#define NCCL_NVLS_TELEMETRY 1
+#endif
+
+enum ncclTelemetryOpType {
+  opTypeGeneric = 0,
+  opTypeScatterGather = 1
+};
+
+struct WaitPeer {
+  void* eventHandle;
+  int channelId;
+  int is_send;
+  int localRank;
+  int remoteRank;
+  int op_type;
+};
 
 enum primsMode {
   primsModeDefault = 0,
@@ -42,6 +60,8 @@ class Primitives<T, RedOp, Fan, Direct, ProtoSimple<SlicePerChunk, StepPerSlice,
   int connStepSize; // Connection step size
   void* netDeviceHandle;
   uint64_t accSize;
+  telemetry::MpscFifoRef<telemetry::Span<WaitPeer>> fifo;
+  int peer_rank = -1;
 
   // Don't use barrier 0 as it's used by the final sync
   __device__ void barrier() {
@@ -223,8 +243,29 @@ class Primitives<T, RedOp, Fan, Direct, ProtoSimple<SlicePerChunk, StepPerSlice,
           if (Src) ncclShmem.groups[group].srcs[0] = (SrcBuf == Input ? userInput : userOutput) + srcIx + offset;
           if (Dst) ncclShmem.groups[group].dsts[0] = (DstBuf == Input ? userInput : userOutput) + dstIx + offset;
         }
+        unsigned long long waitBegin, waitEnd;
+        if (fifo.IsActive() && (flags & (Recv * RoleWaitRecv | Send * RoleWaitSend))) {
+          waitBegin = globaltimer();
+        }
         waitPeer<DirectRecv, DirectSend, Recv, Send, Src, Dst>(srcIx, dstIx, offset, sliceSize);
+        if (fifo.IsActive() && (flags & (Recv * RoleWaitRecv | Send * RoleWaitSend))) {
+          waitEnd = globaltimer();
+        }
         subBarrier();
+        if (fifo.IsActive() && (flags & (Recv * RoleWaitRecv | Send * RoleWaitSend))) {
+          volatile telemetry::Span<WaitPeer>* entry = (volatile telemetry::Span<WaitPeer>*)fifo.NextWrite();
+          if (entry != nullptr) {
+            entry->metadata.eventHandle = 0;
+            entry->metadata.channelId = ncclShmem.channelId;
+            entry->metadata.is_send = (flags & RoleWaitSend) != 0 ? 1 : 0;
+            entry->metadata.localRank = ncclShmem.comm.rank;
+            entry->metadata.remoteRank = this->peer_rank;
+            entry->metadata.op_type = opTypeGeneric;
+            entry->start_ts = (uint64_t)waitBegin;
+            entry->stop_ts = (uint64_t)waitEnd;
+            fifo.CommitWrite();
+          }
+        }
         /* if user abort the kernel, we don't need to actually perform copy/reduce; just set size
          * to 0 to avoid unnecessary workload. */
         int workSize = ncclShmem.aborted ? 0 : sliceSize;
@@ -420,8 +461,33 @@ private:
           // Scatter pre-scales data of input buffer only in non-Direct case
           constexpr int PreOpSrcs = DirectSend ? 0 : 1;
           if (tid == 0) ncclShmem.groups[group].srcs[0] = (T*)ncclShmem.groups[group].userInput + inpIx + offset;
+#if NCCL_NVLS_TELEMETRY
+          unsigned long long waitBegin, waitEnd;
+          // Guard: role checks ensure only the single thread performing waitPeer writes to the FIFO
+          // (otherwise all warp threads would write duplicate logs, saturating the FIFO)
+          if (fifo.IsActive() && (flags & RoleWaitSend)) {
+            waitBegin = globaltimer();
+          }
+#endif
           // realSize is not accurate here; but intra-node does not rely on sizes FIFO
           waitPeer<0, DirectSend, 0, 1, 1, 0>(0, inpIx, offset, realSize);
+#if NCCL_NVLS_TELEMETRY
+          if (fifo.IsActive() && (flags & RoleWaitSend)) {
+            waitEnd = globaltimer();
+            volatile telemetry::Span<WaitPeer>* entry = (volatile telemetry::Span<WaitPeer>*)fifo.NextWrite();
+            if (entry != nullptr) {
+              entry->metadata.eventHandle = 0;
+              entry->metadata.channelId = ncclShmem.channelId;
+              entry->metadata.is_send = 1;
+              entry->metadata.localRank = ncclShmem.comm.rank;
+              entry->metadata.remoteRank = this->peer_rank;
+              entry->metadata.op_type = opTypeScatterGather;
+              entry->start_ts = (uint64_t)waitBegin;
+              entry->stop_ts = (uint64_t)waitEnd;
+              fifo.CommitWrite();
+            }
+          }
+#endif
           subBarrier();
           NVCC_PRAGMA_UNROLL_AUTO
           // Loop over peers
@@ -446,7 +512,32 @@ private:
           ssize_t pOffset = index * peerOffset;
           if (skip >= 0 && index >= skip) pOffset += peerOffset;
           // Adjust remote index with peer offset in case we are directly pulling from peer's output buffer
+#if NCCL_NVLS_TELEMETRY
+          unsigned long long waitBegin, waitEnd;
+          // Guard: role checks ensure only the single thread performing waitPeer writes to the FIFO
+          // (otherwise all warp threads would write duplicate logs, saturating the FIFO)
+          if (fifo.IsActive() && (flags & RoleWaitRecv)) {
+            waitBegin = globaltimer();
+          }
+#endif
           waitPeer<DirectRecv, 0, 1, 0, 0, 1>(outIx + pOffset, outIx + pOffset, offset, realSize);
+#if NCCL_NVLS_TELEMETRY
+          if (fifo.IsActive() && (flags & RoleWaitRecv)) {
+            waitEnd = globaltimer();
+            volatile telemetry::Span<WaitPeer>* entry = (volatile telemetry::Span<WaitPeer>*)fifo.NextWrite();
+            if (entry != nullptr) {
+              entry->metadata.eventHandle = 0;
+              entry->metadata.channelId = ncclShmem.channelId;
+              entry->metadata.is_send = 0;
+              entry->metadata.localRank = ncclShmem.comm.rank;
+              entry->metadata.remoteRank = this->peer_rank;
+              entry->metadata.op_type = opTypeScatterGather;
+              entry->start_ts = (uint64_t)waitBegin;
+              entry->stop_ts = (uint64_t)waitEnd;
+              fifo.CommitWrite();
+            }
+          }
+#endif
           subBarrier();
           NVCC_PRAGMA_UNROLL_AUTO
           for (int j = 0; j < fan.nrecv(); j++) {
@@ -627,6 +718,7 @@ public:
 
       if (flags & (RoleWaitRecv | RolePostRecv)) peer = recvPeers[index];
       if (flags & (RoleWaitSend | RolePostSend)) peer = sendPeers[index];
+      this->peer_rank = peer;
 
       // Coverity thinks that index could be -1 here but that's not actually the case.
       // coverity[negative_returns:FALSE]
@@ -751,6 +843,10 @@ public:
       ncclShmem.groups[group].userInput = (void*)inputBuf;
       ncclShmem.groups[group].userOutput = (void*)outputBuf;
       ncclShmem.groups[group].redOpArgs = redOpArg; // scaler for local input
+    }
+    if (ncclShmem.comm.deviceFifo[ncclShmem.channelId].buffer != nullptr) {
+      struct ncclDeviceFifo* fifo_descr = &ncclShmem.comm.deviceFifo[ncclShmem.channelId];
+      fifo = telemetry::MpscFifoRef<telemetry::Span<WaitPeer>>(fifo_descr->buffer, fifo_descr->log2_size);
     }
 
     if (Direct && ipcReg) {

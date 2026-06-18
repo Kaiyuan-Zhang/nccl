@@ -376,6 +376,7 @@ static ncclResult_t commFree(ncclComm_t comm) {
        comm->cudaDev, comm->busId, abort ? "Abort" : "Destroy");
 
   commPoison(comm); // poison comm before free to avoid comm reuse.
+  NCCLCHECK(ncclProfilerDestroyDeviceFifo(comm->nDevicefifo, &comm->deviceFifoHandle[0]));
   NCCLCHECK(ncclProfilerPluginFinalize(comm));
   if (sharedResRefCount == 0) {
     NCCLCHECK(ncclNetFinalize(comm));
@@ -653,6 +654,12 @@ static ncclResult_t devCommSetup(ncclComm_t comm) {
   tmpCommAndChans.comm.workCompleted = comm->profiler.workCompleted;
   ncclCommPushCudaHostFree(comm, comm->profiler.workStarted);
   ncclCommPushCudaHostFree(comm, comm->profiler.workCompleted);
+
+  struct ncclDeviceFifo* deviceFifo;
+  NCCLCHECKGOTO(ncclCudaHostCalloc(&deviceFifo, MAXCHANNELS), ret, fail);
+  memcpy(deviceFifo, &comm->deviceFifo[0], sizeof(*deviceFifo) * MAXCHANNELS);
+  tmpCommAndChans.comm.deviceFifo = deviceFifo;
+  ncclCommPushCudaHostFree(comm, deviceFifo);
 
   if (comm->collNetDenseToUserRank != nullptr) {
     NCCLCHECKGOTO(ncclCudaCallocAsync(&tmpCommAndChans.comm.collNetDenseToUserRank, nRanks, deviceStream,
@@ -1684,6 +1691,11 @@ static ncclResult_t initTransportsRank(struct ncclComm* comm, struct ncclComm* p
 
   comm->ceColl.baseUCSymReadyPtr = NULL;
   comm->ceColl.baseUCSymComplPtr = NULL;
+
+  comm->nDevicefifo = MAXCHANNELS;
+  memset(&comm->deviceFifo[0], 0, sizeof(comm->deviceFifo));
+  memset(&comm->deviceFifoHandle[0], 0, sizeof(comm->deviceFifoHandle));
+  NCCLCHECK(ncclProfilerCreateDeviceFifo(MAXCHANNELS, &comm->deviceFifo[0], &comm->deviceFifoHandle[0]));
 
   // Call devCommSetup before the last barrier, making sure we don't have a thread running in front and starting to
   // launch NCCL kernels before all cuda mem allocation is complete. That could cause a deadlock.

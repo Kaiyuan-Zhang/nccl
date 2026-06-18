@@ -110,6 +110,9 @@ bool ncclProfilerPluginLoaded(void);
 // Profiler callback for network plugin
 ncclResult_t ncclProfilerCallback(void** eHandle, int type, void* pHandle, int64_t pluginId, void* extData);
 
+ncclResult_t ncclProfilerCreateDeviceFifo(int num_fifo, struct ncclDeviceFifo* dev_fifo, void** handles);
+ncclResult_t ncclProfilerDestroyDeviceFifo(int num_fifo, void** handles);
+
 // ============================================================================
 // CE Profiler Declarations
 // ============================================================================

@@ -24,6 +24,7 @@ extern ncclProfiler_t* getNcclProfiler_v3(void* lib);
 extern ncclProfiler_t* getNcclProfiler_v4(void* lib);
 extern ncclProfiler_t* getNcclProfiler_v5(void* lib);
 extern ncclProfiler_t* getNcclProfiler_v6(void* lib);
+extern ncclProfiler_t* getNcclProfiler_v7(void* lib);
 
 static std::mutex profilerMutex;
 static int profilerPluginRefCount;
@@ -70,7 +71,10 @@ static ncclResult_t ncclProfilerPluginLoad(void) {
     profilerName = ncclPluginLibPaths[ncclPluginTypeProfiler];
   }
 
-  ncclProfiler = getNcclProfiler_v6(profilerPluginLib);
+  ncclProfiler = getNcclProfiler_v7(profilerPluginLib);
+  if (ncclProfiler == nullptr) {
+    ncclProfiler = getNcclProfiler_v6(profilerPluginLib);
+  }
   if (ncclProfiler == nullptr) {
     ncclProfiler = getNcclProfiler_v5(profilerPluginLib);
   }
@@ -936,3 +940,23 @@ ncclResult_t ncclProfilerStopCeBatchEvent(struct ncclComm* comm, void* ceBatchHa
   }
   return ncclSuccess;
 }
+
+ncclResult_t ncclProfilerCreateDeviceFifo(int num_fifo, struct ncclDeviceFifo* dev_fifo, void** handles) {
+  if (__builtin_expect(ncclProfiler != NULL, 0)) {
+    int eActivationMask = __atomic_load_n(&ncclProfilerEventMask, __ATOMIC_RELAXED);
+    if (ncclProfiler->createDeviceFifo && (eActivationMask & (ncclProfileColl | ncclProfileP2p | ncclProfileDeviceWaitPeer))) {
+      ncclProfiler->createDeviceFifo(num_fifo, dev_fifo, handles);
+    }
+  }
+  return ncclSuccess;
+}
+
+ncclResult_t ncclProfilerDestroyDeviceFifo(int num_fifo, void** handles) {
+  if (__builtin_expect(ncclProfiler != NULL, 0)) {
+    if (ncclProfiler->destroyDeviceFifo) {
+      ncclProfiler->destroyDeviceFifo(num_fifo, handles);
+    }
+  }
+  return ncclSuccess;
+}
+
